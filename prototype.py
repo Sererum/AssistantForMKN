@@ -1,12 +1,15 @@
-import requests
-import json
-import tiktoken
 import fasttext
 import fasttext.util
+import json
 import numpy as np
 import re
-from typing import List, Dict
+import requests
+import tiktoken
+import traceback
+
+from requests.exceptions import Timeout
 from sklearn.metrics.pairwise import cosine_similarity
+from typing import List, Dict
 
 class Assistant():
     API_URL = "http://localhost:1234/v1/chat/completions"
@@ -30,8 +33,9 @@ class Assistant():
             return json.load(f)
 
     def clean_input(self, text: str) -> str:
-        # Удаление ESC-последовательностей и "битых" символов
         text = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', text)
+        text = text.replace('\n', ' ').replace('\r', ' ')
+        text = ' '.join(text.split())
         text = text.encode("utf-8", "ignore").decode("utf-8", "ignore")
         return text.strip()
 
@@ -64,46 +68,59 @@ class Assistant():
         context = self.build_context(relevant)
 
         messages = [
-                {"role": "system", "content": f"Отвечай используя только:\n{context}\nЕсли ответа на данный вопрос нет, скажи: 'У меня нет ответа на этот вопрос'"},
+            {"role": "system", "content": f"Отвечай используя только:\n{context}\nЕсли ответа нет, скажи: 'У меня нет ответа на этот вопрос'"},
             {"role": "user", "content": question}
         ]
 
         try:
-            resp = requests.post(self.API_URL, headers=self.HEADERS, json={
-                "model": self.MODEL_NAME,
-                "messages": messages,
-                "temperature": 0.3,
-                "max_tokens": 12000
-            }, timeout=20)
-
+            resp = requests.post(
+                self.API_URL,
+                headers=self.HEADERS,
+                json={
+                    "model": self.MODEL_NAME,
+                    "messages": messages,
+                    "temperature": 0.3,
+                    "max_tokens": 12000
+                },
+                timeout=20  # Таймаут разделим на connect и read
+            )
+            resp.raise_for_status()
+            
             raw_answer = resp.json()["choices"][0]["message"]["content"]
             cleaned_answer = re.sub(r'^(Ответ:\s*|ОТВЕТ:\s*|answer:\s*)', '', raw_answer, flags=re.IGNORECASE)
+            
+            return cleaned_answer.strip()
 
-            return cleaned_answer.strip() 
+        except Timeout as e:
+            print(f"Timeout error: {str(e)}")
+            return "Сервер долго не отвечает, попробуйте задать вопрос позже"
+            
+        except ConnectionError as e:
+            print(f"Connection error: {str(e)}")
+            return "Не удалось подключиться к серверу"
+            
+        except RequestException as e:
+            print(f"Request error: {str(e)}")
+            return f"Ошибка при выполнении запроса: {str(e)}"
+            
         except Exception as e:
-            return f"Ошибка: {str(e)}"
+            print(f"Unexpected error: {traceback.format_exc()}")
+            return "Произошла непредвиденная ошибка"
 
     def get_answer(self, question: str):
         try:
             print(f"\nInput question: '{question}'")
-            
             cleaned = self.clean_input(question)
-            print(f"Cleaned question: '{cleaned}'")
             
             relevant = self.find_relevant_entries(cleaned)
-            print(f"Found {len(relevant)} relevant entries")
-            
             if not relevant:
                 return "Нет подходящих ответов в базе"
                 
-            context = self.build_context(relevant)
-            print(f"Context size: {self.count_tokens(context)} tokens")
-            
             return self.ask_with_faq(cleaned)
             
         except Exception as e:
-            print(f"Full error trace:\n{traceback.format_exc()}")
-            return "Ошибка обработки запроса"
+            print(f"Critical error: {traceback.format_exc()}")
+            return "Системная ошибка при обработке запроса"
 
 
 if __name__ == "__main__":
