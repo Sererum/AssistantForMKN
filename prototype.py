@@ -38,7 +38,7 @@ class Assistant():
     def count_tokens(self, text: str) -> int:
         return len(tiktoken.get_encoding("cl100k_base").encode(text))
 
-    def find_relevant_entries(self, user_question: str, top_n=10, threshold=0.55):
+    def find_relevant_entries(self, user_question: str, top_n=15, threshold=0.55):
         user_embedding = self.ft_model.get_sentence_vector(user_question).reshape(1, -1)
         sim_scores = cosine_similarity(user_embedding, self.question_embeddings)[0]
 
@@ -64,7 +64,7 @@ class Assistant():
         context = self.build_context(relevant)
 
         messages = [
-            {"role": "system", "content": f"Отвечай используя только:\n{context}"},
+                {"role": "system", "content": f"Отвечай используя только:\n{context}\nЕсли ответа на данный вопрос нет, скажи: 'У меня нет ответа на этот вопрос'"},
             {"role": "user", "content": question}
         ]
 
@@ -72,25 +72,46 @@ class Assistant():
             resp = requests.post(self.API_URL, headers=self.HEADERS, json={
                 "model": self.MODEL_NAME,
                 "messages": messages,
-                "temperature": 0.25,
+                "temperature": 0.3,
                 "max_tokens": 12000
-            }, timeout=10)
-            return resp.json()["choices"][0]["message"]["content"]
+            }, timeout=20)
+
+            raw_answer = resp.json()["choices"][0]["message"]["content"]
+            cleaned_answer = re.sub(r'^(Ответ:\s*|ОТВЕТ:\s*|answer:\s*)', '', raw_answer, flags=re.IGNORECASE)
+
+            return cleaned_answer.strip() 
         except Exception as e:
             return f"Ошибка: {str(e)}"
 
     def get_answer(self, question: str):
         try:
-            question = self.clean_input(question)
-            return self.ask_with_faq(question)
+            print(f"\nInput question: '{question}'")
+            
+            cleaned = self.clean_input(question)
+            print(f"Cleaned question: '{cleaned}'")
+            
+            relevant = self.find_relevant_entries(cleaned)
+            print(f"Found {len(relevant)} relevant entries")
+            
+            if not relevant:
+                return "Нет подходящих ответов в базе"
+                
+            context = self.build_context(relevant)
+            print(f"Context size: {self.count_tokens(context)} tokens")
+            
+            return self.ask_with_faq(cleaned)
+            
         except Exception as e:
-            print(f"Критическая ошибка: {str(e)}")
-            return "Не удалось обработать запрос"
+            print(f"Full error trace:\n{traceback.format_exc()}")
+            return "Ошибка обработки запроса"
 
 
 if __name__ == "__main__":
     assist = Assistant()
-    while True:
-        q = input("\nYou: ")
-        ans = assist.get_answer(q)
-        print(f"\nAss: {ans}")
+    try:
+        while True:
+            q = input("\n>>> ")
+            ans = assist.get_answer(q)
+            print(f"\nОтвет: {ans}")
+    except KeyboardInterrupt:
+        print(f"\nСессия окончена.")
